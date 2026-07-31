@@ -14,6 +14,7 @@ import type { AppState, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/t
 import "@excalidraw/excalidraw/index.css";
 import { open, save, ask, confirm } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
@@ -206,14 +207,9 @@ function baseName(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-// Slide order: frame name (numeric-aware); unnamed frames keep scene order
+// Slide order = scene order, so the frames panel can reorder by drag
 function sortedFrames(api: ExcalidrawImperativeAPI) {
-  return api
-    .getSceneElements()
-    .filter((el) => el.type === "frame")
-    .sort((a, b) =>
-      (a.name ?? "").localeCompare(b.name ?? "", undefined, { numeric: true })
-    );
+  return api.getSceneElements().filter((el) => el.type === "frame");
 }
 
 // Canvas preferences persisted across restarts (the web app keeps these in localStorage too)
@@ -717,6 +713,12 @@ export default function App() {
     };
   }, [importLibrary]);
 
+  // ---- App version, shown at the bottom of the main menu
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {});
+  }, []);
+
   // ---- Check for app updates on startup (no-op in dev; endpoint only has release builds)
   useEffect(() => {
     (async () => {
@@ -1124,6 +1126,8 @@ export default function App() {
   const [frameThumbs, setFrameThumbs] = useState<
     { id: string; name: string; svg: string }[]
   >([]);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const [dropAt, setDropAt] = useState<number | null>(null);
   const [framesDocked, setFramesDocked] = useState(true);
   const [hasFrames, setHasFrames] = useState(false);
   const framesOpenRef = useRef(false);
@@ -1173,6 +1177,55 @@ export default function App() {
     );
     setFrameThumbs(thumbs);
   }, []);
+
+  // Drag-reorder: frames swap canvas positions and change slide order. Only the
+  // array slots the frames occupy get rewritten, so z-order stays put
+  const moveFrame = (from: number, to: number) => {
+    const api = apiRef.current;
+    if (!api || from === to) return;
+    const all = api.getSceneElementsIncludingDeleted();
+    const slots = all.flatMap((el, i) =>
+      el.type === "frame" && !el.isDeleted ? [i] : []
+    );
+    if (from >= slots.length || to >= slots.length) return;
+    // clone: updateScene rewrites `index` in place and the history snapshot
+    // holds these same objects, so mutating them corrupts the snapshot
+    const frames = slots.map((i) => ({ ...all[i] }));
+    // ponytail: canvas positions are fixed slots handed out in reading order,
+    // so slide N always sits Nth on canvas. Frames keep their own size, so a
+    // deck of mixed-size frames can end up unevenly spaced
+    const spots = frames
+      .map((f) => ({ x: f.x, y: f.y, h: f.height }))
+      .sort((a, b) =>
+        Math.abs(a.y - b.y) > Math.min(a.h, b.h) / 2 ? a.y - b.y : a.x - b.x
+      );
+    frames.splice(to, 0, ...frames.splice(from, 1));
+    const shifts = new Map<string, { dx: number; dy: number }>();
+    frames.forEach((f, i) => {
+      const dx = spots[i].x - f.x;
+      const dy = spots[i].y - f.y;
+      if (dx || dy) shifts.set(f.id, { dx, dy });
+      Object.assign(f, { x: spots[i].x, y: spots[i].y, version: f.version + 1 });
+    });
+    // a frame's contents travel with it
+    const next = all.map((el) => {
+      const shift = el.frameId ? shifts.get(el.frameId) : undefined;
+      return shift
+        ? { ...el, x: el.x + shift.dx, y: el.y + shift.dy, version: el.version + 1 }
+        : el;
+    });
+    slots.forEach((slot, i) => (next[slot] = frames[i]));
+    // ponytail: no captureUpdate — a host-app increment here builds a broken
+    // history entry that wipes the scene on undo. Reorder rides along with the
+    // next edit's undo instead; revisit if per-reorder undo is worth the risk.
+    api.updateScene({ elements: next });
+    // reorder the thumbnails now; the debounced refresh is too slow to feel like a drag
+    setFrameThumbs((t) => {
+      const n = t.slice();
+      n.splice(to, 0, ...n.splice(from, 1));
+      return n;
+    });
+  };
 
   const goToFrame = (id: string) => {
     const api = apiRef.current;
@@ -1765,6 +1818,11 @@ export default function App() {
                 </MainMenu.Item>
               )}
               <MainMenu.DefaultItems.ChangeCanvasBackground />
+              {!!appVersion && (
+                <MainMenu.ItemCustom className="menu-version">
+                  Version {appVersion}
+                </MainMenu.ItemCustom>
+              )}
             </MainMenu>
             <Sidebar name="libraries" docked={libDocked} onDock={setLibDocked}>
               <Sidebar.Header>
@@ -1826,13 +1884,48 @@ export default function App() {
                   <span className="lib-header-title">Frames</span>
                 </div>
               </Sidebar.Header>
-              <div className="frames-list">
+              <div
+                className="frames-list"
+                onDragOver={(e) => {
+                  if (dragFrom === null) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(e) => {
+                  const from = dragFrom;
+                  if (from === null || dropAt === null) return;
+                  e.preventDefault();
+                  moveFrame(from, dropAt > from ? dropAt - 1 : dropAt);
+                  setDragFrom(null);
+                  setDropAt(null);
+                }}
+              >
                 {frameThumbs.map((f, i) => (
                   <button
                     key={f.id}
-                    className="frame-item"
+                    className={`frame-item${
+                      dragFrom === i ? " dragging" : ""
+                    }${dropAt === i ? " drop-above" : ""}${
+                      dropAt === i + 1 ? " drop-below" : ""
+                    }`}
                     onClick={() => goToFrame(f.id)}
                     title={f.name}
+                    draggable
+                    onDragStart={(e) => {
+                      setDragFrom(i);
+                      e.dataTransfer.effectAllowed = "move";
+                      // custom type: a text/plain payload would be picked up as a canvas drop
+                      e.dataTransfer.setData("application/x-frame", String(i));
+                    }}
+                    onDragEnd={() => {
+                      setDragFrom(null);
+                      setDropAt(null);
+                    }}
+                    onDragOver={(e) => {
+                      if (dragFrom === null) return;
+                      const box = e.currentTarget.getBoundingClientRect();
+                      setDropAt(e.clientY < box.top + box.height / 2 ? i : i + 1);
+                    }}
                   >
                     <span className="frame-item-num">{i + 1}</span>
                     <span className="frame-item-body">
