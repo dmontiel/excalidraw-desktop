@@ -1356,6 +1356,19 @@ export default function App() {
     return () => document.removeEventListener("keydown", handler, true);
   }, [handleSave, handleSaveAs, startPresentation]);
 
+  useEffect(() => {
+    // The window needs zoomHotkeysEnabled (see tauri.windows.conf.json) so
+    // trackpad pinch reaches the canvas, but that also turns on WebView2's
+    // browser zoom. Excalidraw already suppresses it inside its own container;
+    // this covers our chrome (sidebar, panels) so ctrl+wheel there can't scale
+    // the whole app.
+    const handler = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) e.preventDefault();
+    };
+    window.addEventListener("wheel", handler, { passive: false });
+    return () => window.removeEventListener("wheel", handler);
+  }, []);
+
   const handleNew = useCallback(async () => {
     const api = apiRef.current;
     if (!api) return;
