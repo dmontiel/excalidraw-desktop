@@ -300,6 +300,7 @@ export default function App() {
   const [currentFile, setCurrentFile] = useState<string | null>(null);
   const currentFileRef = useRef<string | null>(null);
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
+  const canvasWrapRef = useRef<HTMLDivElement | null>(null);
   const [dirty, setDirty] = useState(false);
   const savedVersionRef = useRef(0);
 
@@ -1369,6 +1370,93 @@ export default function App() {
     return () => window.removeEventListener("wheel", handler);
   }, []);
 
+  // ---- Right-button drag pans the canvas (held down only). The browser fires
+  // `contextmenu` on right-button *press*, which would pop the menu before any
+  // drag and block panning — so we swallow every native contextmenu here, and
+  // on release re-dispatch one only when the press didn't turn into a pan (i.e. a
+  // plain right-click), so Excalidraw's menu still works. Panning maps screen
+  // delta to scene scroll via the current zoom.
+  useEffect(() => {
+    const api = excalidrawAPI;
+    const el = canvasWrapRef.current;
+    if (!api || !el) return;
+
+    let panning = false;
+    let moved = false;
+    let allowOneMenu = false; // lets our synthetic contextmenu through the guard
+    let startX = 0;
+    let startY = 0;
+    let startScrollX = 0;
+    let startScrollY = 0;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 2) return;
+      const st = api.getAppState();
+      panning = true;
+      moved = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      startScrollX = st.scrollX;
+      startScrollY = st.scrollY;
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!panning) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) > 4) {
+        moved = true;
+        el.style.cursor = "grabbing";
+      }
+      if (!moved) return;
+      const zoom = api.getAppState().zoom.value;
+      api.updateScene({
+        appState: {
+          scrollX: startScrollX + dx / zoom,
+          scrollY: startScrollY + dy / zoom,
+        },
+      });
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (e.button !== 2 || !panning) return;
+      panning = false;
+      el.style.cursor = "";
+      if (moved) return; // was a pan: leave the menu suppressed
+      // Plain right-click: re-raise the context menu we suppressed on press
+      const target = document.elementFromPoint(e.clientX, e.clientY) ?? el;
+      allowOneMenu = true;
+      target.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          button: 2,
+        })
+      );
+      allowOneMenu = false;
+    };
+
+    // Suppress the native (press-time) context menu; let our synthetic one pass.
+    const onContextMenu = (e: MouseEvent) => {
+      if (allowOneMenu) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    el.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("contextmenu", onContextMenu, true);
+    return () => {
+      el.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("contextmenu", onContextMenu, true);
+    };
+  }, [excalidrawAPI]);
+
   const handleNew = useCallback(async () => {
     const api = apiRef.current;
     if (!api) return;
@@ -1689,7 +1777,7 @@ export default function App() {
             </button>
           </div>
         )}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div ref={canvasWrapRef} style={{ flex: 1, minWidth: 0 }}>
           <Excalidraw
             excalidrawAPI={(api) => {
               if (api && apiRef.current !== api) {
