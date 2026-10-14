@@ -16,7 +16,7 @@ No other dependencies needed, the app uses the OS webview (WebView2 on Windows i
 
 The full Excalidraw editor, plus everything a real desktop tool should do that a browser tab (or PWA) can't:
 
-- **Real files**: a folder-workspace sidebar (nested folders, inline create/rename, right-click actions), true `Ctrl+S` save, autosave, Open Recent, session restore, file association, external-edit detection, and safe deletes to the OS trash.
+- **Real files**: a multi-folder workspace sidebar (add several folders, nested folders, inline create/rename, right-click actions), true `Ctrl+S` save, autosave, Open Recent, session restore, file association, external-edit detection, and safe deletes to the OS trash.
 - **Organized shape libraries**: each imported library is its own collapsible section; one-click installs from [libraries.excalidraw.com](https://libraries.excalidraw.com), local `.excalidrawlib` imports, and a personal section for your own shapes.
 - **Slides from frames**: the Frames panel lists every frame as a numbered thumbnail; click one to jump to it, drag to reorder (the frames swap places on the canvas too), and press `F5` to present them full screen with arrow-key navigation.
 - **AI Diagram**: describe a diagram in plain words and drop editable shapes on the canvas, via Gemini (free AI Studio keys) or Anthropic. See [Security & API keys](#security--api-keys).

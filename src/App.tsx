@@ -52,14 +52,15 @@ const MAX_RECENT = 10;
 interface Settings {
   recentFiles: string[];
   autosave: boolean;
-  workspaceDir: string | null;
+  workspaceDirs: string[];
+  workspaceDir?: string | null; // pre-0.7.0 single folder, migrated into workspaceDirs
   lastFile: string | null;
   showSidebar: boolean;
 }
 const DEFAULT_SETTINGS: Settings = {
   recentFiles: [],
   autosave: false,
-  workspaceDir: null,
+  workspaceDirs: [],
   lastFile: null,
   showSidebar: true,
 };
@@ -67,6 +68,13 @@ const DEFAULT_SETTINGS: Settings = {
 const normPath = (p: string) => p.replace(/\\/g, "/");
 const parentDir = (p: string) =>
   p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")));
+// Workspace root containing path (roots may nest; the deepest wins)
+const rootOf = (roots: string[], p: string) => {
+  const pn = normPath(p);
+  return roots
+    .filter((r) => pn === normPath(r) || pn.startsWith(normPath(r) + "/"))
+    .sort((a, b) => b.length - a.length)[0];
+};
 
 interface WsNode {
   name: string;
@@ -103,7 +111,10 @@ async function buildTree(dir: string, depth = 0): Promise<WsNode[]> {
   const nodes: WsNode[] = [];
   for (const e of entries.filter((e) => e.isDirectory && !e.name.startsWith(".")).sort(byName)) {
     const path = `${dir}/${e.name}`;
-    nodes.push({ name: e.name, path, dir: true, children: await buildTree(path, depth + 1) });
+    const children = await buildTree(path, depth + 1);
+    // Hide folders with no drawings, but keep truly empty ones (just created via "New folder")
+    if (children.length || (await readDir(path).catch(() => [1])).length === 0)
+      nodes.push({ name: e.name, path, dir: true, children });
   }
   for (const e of entries
     .filter((e) => e.isFile && e.name.endsWith(".excalidraw"))
@@ -192,12 +203,15 @@ async function loadLibrarySections(): Promise<LibrarySection[]> {
 
 async function loadSettings(): Promise<Settings> {
   try {
-    return {
+    const s: Settings = {
       ...DEFAULT_SETTINGS,
       ...JSON.parse(
         await readTextFile(SETTINGS_FILE, { baseDir: BaseDirectory.AppData })
       ),
     };
+    if (s.workspaceDir && !s.workspaceDirs.length) s.workspaceDirs = [s.workspaceDir];
+    delete s.workspaceDir;
+    return s;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -325,7 +339,13 @@ export default function App() {
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [autosave, setAutosave] = useState(false);
   const autosaveRef = useRef(false);
-  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
+  // Workspace roots (mirrored in a ref so refreshWorkspace stays stable)
+  const [workspaceDirs, setWorkspaceDirsState] = useState<string[]>([]);
+  const workspaceDirsRef = useRef<string[]>([]);
+  const setWorkspaceDirs = (dirs: string[]) => {
+    workspaceDirsRef.current = dirs;
+    setWorkspaceDirsState(dirs);
+  };
   const [showSidebar, setShowSidebar] = useState(true);
   const [workspaceTree, setWorkspaceTree] = useState<WsNode[]>([]);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -606,8 +626,14 @@ export default function App() {
     };
   }, [openPathGuarded]);
 
-  const refreshWorkspace = useCallback(async (dir: string) => {
-    setWorkspaceTree(await buildTree(dir));
+  // ponytail: rebuilds every root on any change; per-root refresh if big trees get slow
+  const refreshWorkspace = useCallback(async () => {
+    const dirs = workspaceDirsRef.current;
+    setWorkspaceTree(
+      await Promise.all(
+        dirs.map(async (d) => ({ name: baseName(d), path: d, dir: true, children: await buildTree(d) }))
+      )
+    );
   }, []);
 
   // Runs once the Excalidraw API is ready
@@ -618,10 +644,11 @@ export default function App() {
     setAutosave(settings.autosave);
     autosaveRef.current = settings.autosave;
     setShowSidebar(settings.showSidebar);
-    if (settings.workspaceDir && (await exists(settings.workspaceDir))) {
-      setWorkspaceDir(settings.workspaceDir);
-      refreshWorkspace(settings.workspaceDir);
-    }
+    const roots: string[] = [];
+    for (const d of settings.workspaceDirs) if (await exists(d)) roots.push(d);
+    setWorkspaceDirs(roots);
+    setExpandedDirs(new Set(roots));
+    refreshWorkspace();
 
     // A file double-clicked in the file manager wins; else reopen where we left off
     const launchFile =
@@ -630,16 +657,13 @@ export default function App() {
     const restore = launchFile ?? settings.lastFile;
     if (restore && (await exists(restore))) {
       // Reveal the file in the sidebar: expand its ancestor folders
-      if (settings.workspaceDir) {
-        const ws = normPath(settings.workspaceDir);
-        const rel = normPath(restore);
-        if (rel.startsWith(ws + "/")) {
-          const dirs: string[] = [];
-          let p = settings.workspaceDir;
-          for (const seg of rel.slice(ws.length + 1).split("/").slice(0, -1))
-            dirs.push((p = `${p}/${seg}`));
-          if (dirs.length) setExpandedDirs((prev) => new Set([...prev, ...dirs]));
-        }
+      const root = rootOf(roots, restore);
+      if (root) {
+        const dirs: string[] = [];
+        let p = root;
+        for (const seg of normPath(restore).slice(normPath(root).length + 1).split("/").slice(0, -1))
+          dirs.push((p = `${p}/${seg}`));
+        if (dirs.length) setExpandedDirs((prev) => new Set([...prev, ...dirs]));
       }
       loadFile(restore);
     }
@@ -910,12 +934,12 @@ export default function App() {
     };
   }, [currentFile, loadFile]);
 
-  // ---- Workspace: watch the folder for added/removed files
+  // ---- Workspace: watch the folders for added/removed files
   useEffect(() => {
-    if (!workspaceDir) return;
+    if (!workspaceDirs.length) return;
     let stop: (() => void) | undefined;
     let cancelled = false;
-    watch(workspaceDir, () => refreshWorkspace(workspaceDir), {
+    watch(workspaceDirs, () => refreshWorkspace(), {
       delayMs: 500,
       recursive: true,
     })
@@ -928,17 +952,31 @@ export default function App() {
       cancelled = true;
       stop?.();
     };
-  }, [workspaceDir, refreshWorkspace]);
+  }, [workspaceDirs, refreshWorkspace]);
 
   const handleOpenFolder = useCallback(async () => {
-    const selected = await open({ directory: true, multiple: false });
+    // recursive: folders outside the static fs scope need the grant to cover subfolders
+    const selected = await open({ directory: true, multiple: false, recursive: true });
     if (!selected) return;
-    setWorkspaceDir(selected);
+    const dirs = workspaceDirsRef.current;
+    if (!dirs.some((d) => normPath(d) === normPath(selected))) {
+      setWorkspaceDirs([...dirs, selected]);
+      persistSettings({ workspaceDirs: workspaceDirsRef.current });
+    }
+    setExpandedDirs((prev) => new Set(prev).add(selected));
     setSelectedDir(null);
     setShowSidebar(true);
-    persistSettings({ workspaceDir: selected, showSidebar: true });
-    refreshWorkspace(selected);
+    persistSettings({ showSidebar: true });
+    refreshWorkspace();
   }, [refreshWorkspace]);
+
+  // Drops the folder from the workspace; nothing on disk is touched
+  const removeRoot = (dir: string) => {
+    setWorkspaceDirs(workspaceDirsRef.current.filter((d) => d !== dir));
+    persistSettings({ workspaceDirs: workspaceDirsRef.current });
+    if (selectedDir && rootOf([dir], selectedDir)) setSelectedDir(null);
+    refreshWorkspace();
+  };
 
   // × hides the sidebar; the folder stays remembered for the titlebar toggle
   const handleCloseFolder = () => {
@@ -948,15 +986,15 @@ export default function App() {
   };
 
   const toggleSidebar = useCallback(() => {
-    if (showSidebar && workspaceDir) {
+    if (showSidebar && workspaceDirs.length) {
       handleCloseFolder();
-    } else if (workspaceDir) {
+    } else if (workspaceDirs.length) {
       setShowSidebar(true);
       persistSettings({ showSidebar: true });
     } else {
       handleOpenFolder();
     }
-  }, [showSidebar, workspaceDir, handleOpenFolder]);
+  }, [showSidebar, workspaceDirs, handleOpenFolder]);
 
   const createFileIn = useCallback(
     async (dir: string) => {
@@ -976,10 +1014,8 @@ export default function App() {
         markSaved(api.getSceneElements());
         addRecent(path);
         persistSettings({ lastFile: path });
-        if (workspaceDir) {
-          setExpandedDirs((prev) => new Set(prev).add(dir));
-          await refreshWorkspace(workspaceDir);
-        }
+        setExpandedDirs((prev) => new Set(prev).add(dir));
+        await refreshWorkspace();
         // Drop straight into naming the new file
         setRenaming({ path, value: name.replace(/\.excalidraw$/, "") });
       } catch (err) {
@@ -987,12 +1023,13 @@ export default function App() {
         api.setToast({ message: `Could not create file: ${err}`, closable: true });
       }
     },
-    [workspaceDir, refreshWorkspace]
+    [refreshWorkspace]
   );
 
   const deleteNode = async (node: WsNode) => {
-    // Nodes only ever come from the workspace tree, which requires an open folder.
-    if (!workspaceDir) return;
+    // Nodes only ever come from the workspace tree, so a root always matches.
+    const root = rootOf(workspaceDirsRef.current, node.path);
+    if (!root) return;
     const yes = await confirm(
       node.dir
         ? `Move folder "${node.name}" and everything in it to the trash?`
@@ -1001,7 +1038,7 @@ export default function App() {
     );
     if (!yes) return;
     try {
-      await invoke("move_to_trash", { path: node.path, workspaceRoot: workspaceDir });
+      await invoke("move_to_trash", { path: node.path, workspaceRoot: root });
       const gone = normPath(node.path);
       const covers = (p: string) => {
         const pn = normPath(p);
@@ -1017,7 +1054,7 @@ export default function App() {
       const recents = settingsRef.current.recentFiles.filter((p) => !covers(p));
       setRecentFiles(recents);
       persistSettings({ recentFiles: recents });
-      if (workspaceDir) refreshWorkspace(workspaceDir);
+      refreshWorkspace();
     } catch (err) {
       console.error("Delete failed:", err);
       apiRef.current?.setToast({ message: `Delete failed: ${err}`, closable: true });
@@ -1047,7 +1084,7 @@ export default function App() {
       lastWriteRef.current = Date.now();
       await rename(oldPath, newPath);
       fixupPaths(oldPath, newPath, !!r.dir);
-      if (workspaceDir) refreshWorkspace(workspaceDir);
+      refreshWorkspace();
     } catch (err) {
       console.error("Rename failed:", err);
       apiRef.current?.setToast({ message: `Rename failed: ${err}`, closable: true });
@@ -1093,7 +1130,7 @@ export default function App() {
       await rename(node.path, newPath);
       fixupPaths(node.path, newPath, node.dir);
       setExpandedDirs((prev) => new Set(prev).add(destDir));
-      if (workspaceDir) refreshWorkspace(workspaceDir);
+      refreshWorkspace();
     } catch (err) {
       console.error("Move failed:", err);
       apiRef.current?.setToast({ message: `Move failed: ${err}`, closable: true });
@@ -1109,17 +1146,15 @@ export default function App() {
         }
         const path = `${dir}/${name}`;
         await mkdir(path);
-        if (workspaceDir) {
-          setExpandedDirs((prev) => new Set(prev).add(dir));
-          await refreshWorkspace(workspaceDir);
-        }
+        setExpandedDirs((prev) => new Set(prev).add(dir));
+        await refreshWorkspace();
         setRenaming({ path, value: name, dir: true });
       } catch (err) {
         console.error("New folder failed:", err);
         apiRef.current?.setToast({ message: `Could not create folder: ${err}`, closable: true });
       }
     },
-    [workspaceDir, refreshWorkspace]
+    [refreshWorkspace]
   );
 
   // ---- Frames panel: PowerPoint-style slide list
@@ -1432,14 +1467,16 @@ export default function App() {
       if (node.dir) {
         const isOpen = expandedDirs.has(node.path);
         const selected = selectedDir === node.path;
+        const isRoot = depth === 0;
         return (
           <div key={node.path}>
             <button
-              className={`workspace-file workspace-dir${selected ? " selected" : ""}${
-                dropDir === node.path ? " drop-target" : ""
-              }`}
+              className={`workspace-file workspace-dir${isRoot ? " workspace-root" : ""}${
+                selected ? " selected" : ""
+              }${dropDir === node.path ? " drop-target" : ""}`}
               style={indent}
-              draggable
+              title={isRoot ? node.path : undefined}
+              draggable={!isRoot}
               onDragStart={(e) => {
                 dragNodeRef.current = node;
                 e.dataTransfer.effectAllowed = "move";
@@ -1481,6 +1518,9 @@ export default function App() {
               <span className="workspace-name">{node.name}</span>
             </button>
             {isOpen && renderNodes(node.children ?? [], depth + 1)}
+            {isOpen && isRoot && !node.children?.length && (
+              <div className="workspace-empty">No .excalidraw files</div>
+            )}
           </div>
         );
       }
@@ -1579,58 +1619,35 @@ export default function App() {
         />
       )}
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-        {workspaceDir && showSidebar && !presenting && (
+        {workspaceDirs.length > 0 && showSidebar && !presenting && (
           <div className="workspace-sidebar">
             <div className="workspace-header">
-              <span
-                className="workspace-title"
-                title={workspaceDir}
-                onClick={() => setSelectedDir(null)}
-              >
-                {baseName(workspaceDir)}
+              <span className="workspace-title" onClick={() => setSelectedDir(null)}>
+                Workspace
               </span>
               <button
                 className="workspace-btn"
-                onClick={() => createFileIn(selectedDir ?? workspaceDir)}
-                title={`New file in ${baseName(selectedDir ?? workspaceDir)}`}
+                onClick={() => createFileIn(selectedDir ?? workspaceDirs[0])}
+                title={`New file in ${baseName(selectedDir ?? workspaceDirs[0])}`}
               >
                 <FilePlusIcon />
               </button>
               <button
                 className="workspace-btn"
-                onClick={() => createFolderIn(selectedDir ?? workspaceDir)}
-                title={`New folder in ${baseName(selectedDir ?? workspaceDir)}`}
+                onClick={() => createFolderIn(selectedDir ?? workspaceDirs[0])}
+                title={`New folder in ${baseName(selectedDir ?? workspaceDirs[0])}`}
               >
                 <FolderPlusIcon />
               </button>
-              <button className="workspace-btn" onClick={handleCloseFolder} title="Close folder">
+              <button className="workspace-btn" onClick={handleOpenFolder} title="Add folder to workspace">
+                +
+              </button>
+              <button className="workspace-btn" onClick={handleCloseFolder} title="Hide sidebar">
                 ×
               </button>
             </div>
-            <div
-              className={`workspace-list${
-                dropDir && normPath(dropDir) === normPath(workspaceDir) ? " drop-root" : ""
-              }`}
-              onDragOver={(e) => {
-                if (!dragNodeRef.current) return;
-                e.preventDefault();
-                setDropDir(workspaceDir);
-              }}
-              onDragLeave={(e) => {
-                if (e.currentTarget === e.target) setDropDir(null);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDropDir(null);
-                const n = dragNodeRef.current;
-                dragNodeRef.current = null;
-                if (n) moveNode(n, workspaceDir);
-              }}
-            >
+            <div className="workspace-list">
               {renderNodes(workspaceTree, 0)}
-              {workspaceTree.length === 0 && (
-                <div className="workspace-empty">No .excalidraw files</div>
-              )}
             </div>
           </div>
         )}
@@ -1642,7 +1659,16 @@ export default function App() {
               top: Math.min(ctxMenu.y, window.innerHeight - 140),
             }}
           >
-            {ctxMenu.node.dir ? (
+            {workspaceDirs.includes(ctxMenu.node.path) ? (
+              <>
+                <button className="ctx-menu-item" onClick={() => createFileIn(ctxMenu.node.path)}>
+                  New file here
+                </button>
+                <button className="ctx-menu-item" onClick={() => removeRoot(ctxMenu.node.path)}>
+                  Remove folder from workspace
+                </button>
+              </>
+            ) : ctxMenu.node.dir ? (
               <>
                 <button className="ctx-menu-item" onClick={() => createFileIn(ctxMenu.node.path)}>
                   New file here
@@ -1796,7 +1822,7 @@ export default function App() {
                 New from Template...
               </MainMenu.Item>
               <MainMenu.Item onSelect={() => setTimeout(handleOpen, 100)}>Open File...</MainMenu.Item>
-              <MainMenu.Item onSelect={() => setTimeout(handleOpenFolder, 100)}>Open Folder...</MainMenu.Item>
+              <MainMenu.Item onSelect={() => setTimeout(handleOpenFolder, 100)}>Add Folder to Workspace...</MainMenu.Item>
               <MainMenu.Item onSelect={() => setTimeout(handleSave, 100)}>Save</MainMenu.Item>
               <MainMenu.Item onSelect={() => setTimeout(handleSaveAs, 100)}>Save As...</MainMenu.Item>
               <MainMenu.Item onSelect={() => setTimeout(handleSaveAsTemplate, 100)}>
