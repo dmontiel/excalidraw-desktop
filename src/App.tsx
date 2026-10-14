@@ -347,6 +347,13 @@ export default function App() {
     setWorkspaceDirsState(dirs);
   };
   const [showSidebar, setShowSidebar] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      return Number(localStorage.getItem("sidebar-width")) || 200;
+    } catch {
+      return 200;
+    }
+  });
   const [workspaceTree, setWorkspaceTree] = useState<WsNode[]>([]);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   // Folder targeted by the header new-file/new-folder buttons (click a row to set)
@@ -1475,7 +1482,7 @@ export default function App() {
                 selected ? " selected" : ""
               }${dropDir === node.path ? " drop-target" : ""}`}
               style={indent}
-              title={isRoot ? node.path : undefined}
+              title={isRoot ? node.path : node.name}
               draggable={!isRoot}
               onDragStart={(e) => {
                 dragNodeRef.current = node;
@@ -1620,7 +1627,37 @@ export default function App() {
       )}
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         {workspaceDirs.length > 0 && showSidebar && !presenting && (
-          <div className="workspace-sidebar">
+          <div className="workspace-sidebar" style={{ width: sidebarWidth }}>
+            <div
+              className="workspace-resizer"
+              title="Drag to resize"
+              onPointerDown={(e) => {
+                const el = e.currentTarget;
+                el.setPointerCapture(e.pointerId);
+                const startX = e.clientX;
+                const startW = sidebarWidth;
+                let w = startW;
+                const move = (ev: PointerEvent) => {
+                  w = Math.min(600, Math.max(150, startW + ev.clientX - startX));
+                  setSidebarWidth(w);
+                };
+                const up = () => {
+                  el.removeEventListener("pointermove", move);
+                  el.removeEventListener("pointerup", up);
+                  try {
+                    localStorage.setItem("sidebar-width", String(w));
+                  } catch {}
+                };
+                el.addEventListener("pointermove", move);
+                el.addEventListener("pointerup", up);
+              }}
+              onDoubleClick={() => {
+                setSidebarWidth(200);
+                try {
+                  localStorage.setItem("sidebar-width", "200");
+                } catch {}
+              }}
+            />
             <div className="workspace-header">
               <span className="workspace-title" onClick={() => setSelectedDir(null)}>
                 Workspace
