@@ -148,7 +148,7 @@ body,
 }
 
 .autosave-pill.on {
-  background: #6965db;
+  background: #0d9488;
 }
 
 .autosave-knob {
@@ -175,7 +175,7 @@ body,
 }
 
 :root[data-theme="dark"] .autosave-pill.on {
-  background: #6965db;
+  background: #14b8a6;
 }
 
 /* Theme toggle */
@@ -218,7 +218,11 @@ body,
 }
 
 .workspace-resizer:hover {
-  background: rgba(105, 101, 219, 0.35);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+:root[data-theme="dark"] .workspace-resizer:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .workspace-header {
@@ -306,7 +310,7 @@ body,
 }
 
 .workspace-file.active {
-  background: #e3e2fe;
+  background: #dcdcdc;
   color: #333;
 }
 
@@ -623,7 +627,7 @@ body,
 }
 
 :root[data-theme="dark"] .workspace-file.active {
-  background: #403e6a;
+  background: #3d3d3d;
   color: #eee;
 }
 
@@ -1015,7 +1019,20 @@ body,
   display: none;
 }
 
-/* ---- AI diagram draft dialog */
+/* ---- AI diagram draft dialog: teal accent instead of Excalidraw's purple */
+.ai-modal,
+.excalidraw .ai-canvas-btn {
+  --color-primary: #0d9488;
+  --color-primary-darker: #0f766e;
+  --color-primary-light: rgba(13, 148, 136, 0.14);
+}
+:root[data-theme="dark"] .ai-modal,
+:root[data-theme="dark"] .excalidraw .ai-canvas-btn {
+  --color-primary: #14b8a6;
+  --color-primary-darker: #0d9488;
+  --color-primary-light: rgba(20, 184, 166, 0.16);
+}
+
 .ai-modal {
   background: var(--island-bg-color, #fff);
   color: var(--text-primary-color, #1b1b1f);
@@ -1064,7 +1081,7 @@ body,
   gap: 4px;
   padding: 4px;
   border-radius: 10px;
-  background: var(--island-bg-color, #f1f0f9);
+  background: rgba(0, 0, 0, 0.04);
   border: 1px solid var(--dialog-border-color, rgba(0, 0, 0, 0.08));
   margin-bottom: 16px;
 }
