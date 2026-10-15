@@ -19,7 +19,9 @@ The full Excalidraw editor, plus everything a real desktop tool should do that a
 - **Real files**: a multi-folder workspace sidebar (add several folders, nested folders, inline create/rename, right-click actions), true `Ctrl+S` save, autosave, Open Recent, session restore, file association, external-edit detection, and safe deletes to the OS trash.
 - **Organized shape libraries**: each imported library is its own collapsible section; one-click installs from [libraries.excalidraw.com](https://libraries.excalidraw.com), local `.excalidrawlib` imports, and a personal section for your own shapes.
 - **Slides from frames**: the Frames panel lists every frame as a numbered thumbnail; click one to jump to it, drag to reorder (the frames swap places on the canvas too), and press `F5` to present them full screen with arrow-key navigation.
-- **AI Diagram**: describe a diagram in plain words and drop editable shapes on the canvas, via Gemini (free AI Studio keys) or Anthropic. See [Security & API keys](#security--api-keys).
+- **Linked diagrams**: drag a sidebar file onto the canvas to create a card that opens it, or right-click a file → "Copy link" and paste it into any shape (`Ctrl+K`). Hover a file for a preview.
+- **Editable image export**: right-click a file or the canvas → "Save as SVG/PNG". The drawing is embedded, so the image reopens in Excalidraw.
+- **AI Diagram**: describe a diagram, edit a selection in plain words, or turn a photo/sketch into editable shapes. Works with Gemini (free AI Studio keys) or Anthropic. See [Security & API keys](#security--api-keys).
 - **Desktop-grade behavior**: self-updating (signed packages), persistent preferences, single-instance, custom titlebar, and a tiny footprint using the OS webview.
 - **Cross-platform**: Windows, macOS, and Linux.
 

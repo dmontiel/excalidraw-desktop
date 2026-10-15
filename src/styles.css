@@ -1075,6 +1075,61 @@ body,
   line-height: 1.4;
 }
 
+/* Mode tabs: Describe / Edit / From image */
+.ai-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--dialog-border-color, rgba(0, 0, 0, 0.1));
+  margin-bottom: 14px;
+}
+.ai-tabs button {
+  border: none;
+  background: none;
+  padding: 7px 10px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--text-primary-color, #444);
+  opacity: 0.7;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ai-tabs button:hover {
+  opacity: 1;
+}
+.ai-tabs button.active {
+  opacity: 1;
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+.ai-image {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.ai-image img {
+  max-width: 220px;
+  max-height: 140px;
+  border-radius: 8px;
+  border: 1px solid var(--dialog-border-color, rgba(0, 0, 0, 0.1));
+  object-fit: contain;
+}
+.ai-image-empty {
+  flex: 1;
+  padding: 22px 12px;
+  text-align: center;
+  border: 1.5px dashed var(--dialog-border-color, rgba(0, 0, 0, 0.18));
+  border-radius: 8px;
+  opacity: 0.7;
+}
+.ai-image-pick {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
 /* Segmented provider toggle */
 .ai-seg {
   display: flex;
@@ -1275,4 +1330,57 @@ body,
 }
 .ai-link:hover {
   text-decoration: underline;
+}
+
+/* Sidebar hover preview */
+.ws-preview {
+  position: fixed;
+  z-index: 50;
+  width: 280px;
+  padding: 8px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+}
+.ws-preview-name {
+  margin: 0 2px 6px;
+  font-weight: 600;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-preview img {
+  display: block;
+  width: 100%;
+  height: 170px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #fff;
+}
+.ws-preview-empty {
+  height: 170px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #999;
+}
+:root[data-theme="dark"] .ws-preview {
+  background: #2a2a2e;
+}
+:root[data-theme="dark"] .ws-preview-name {
+  color: #ddd;
+}
+
+/* Save as SVG/PNG items appended to Excalidraw's canvas context menu */
+.ctx-export-slot {
+  list-style: none;
+}
+.ai-image-note {
+  flex: 1;
+  font-size: 12px;
+  color: var(--color-primary);
 }

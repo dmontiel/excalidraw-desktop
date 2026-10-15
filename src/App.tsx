@@ -5,6 +5,11 @@ import {
   MainMenu,
   Sidebar,
   exportToSvg,
+  exportToBlob,
+  convertToExcalidrawElements,
+  viewportCoordsToSceneCoords,
+  CaptureUpdateAction,
+  ROUNDNESS,
   loadFromBlob,
   loadLibraryFromBlob,
   serializeAsJSON,
@@ -22,6 +27,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   readTextFile,
   writeTextFile,
+  writeFile,
   readDir,
   exists,
   rename,
@@ -34,6 +40,7 @@ import { appDataDir } from "@tauri-apps/api/path";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import Titlebar from "./Titlebar";
 import AiDraft from "./AiDraft";
+import { relativePath, resolvePath, isDiagramLink, isAbsolutePath } from "./paths";
 import {
   LibraryPanel,
   insertLibraryItem,
@@ -347,6 +354,10 @@ export default function App() {
     setWorkspaceDirsState(dirs);
   };
   const [showSidebar, setShowSidebar] = useState(true);
+  // Sidebar hover preview: rendered SVG blob URLs, "" = empty/unreadable
+  const [preview, setPreview] = useState<{ path: string; url: string | null; left: number; top: number } | null>(null);
+  const previewCache = useRef(new Map<string, string>());
+  const hoverRef = useRef<{ path: string | null; timer?: number }>({ path: null });
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     try {
       return Number(localStorage.getItem("sidebar-width")) || 200;
@@ -378,6 +389,8 @@ export default function App() {
   // The trigger button is portaled into Excalidraw's undo/redo row (aiSlot).
   const [aiDraft, setAiDraft] = useState(false);
   const [aiSlot, setAiSlot] = useState<HTMLElement | null>(null);
+  // Our Save as SVG/PNG items, portaled into Excalidraw's canvas right-click menu
+  const [canvasMenuSlot, setCanvasMenuSlot] = useState<HTMLElement | null>(null);
 
   // Templates: <appData>/templates, subfolders are categories
   const [tplPicker, setTplPicker] = useState<WsNode[] | null>(null);
@@ -404,6 +417,30 @@ export default function App() {
       setAiSlot(slot);
     };
     attach();
+    const obs = new MutationObserver(attach);
+    obs.observe(document.body, { childList: true, subtree: true });
+    return () => obs.disconnect();
+  }, [excalidrawAPI]);
+
+  // Excalidraw has no API for extra context-menu items, so append a slot to
+  // its menu when it opens. Only the empty-canvas menu (it has "Select all"),
+  // not the per-element one.
+  useEffect(() => {
+    if (!excalidrawAPI) return;
+    let current: HTMLElement | null = null;
+    const attach = () => {
+      const menu = document.querySelector<HTMLElement>(".excalidraw .context-menu");
+      const isCanvas = !!menu?.querySelector('[data-testid="selectAll"]');
+      if (!menu || !isCanvas) {
+        if (current) setCanvasMenuSlot((current = null));
+        return;
+      }
+      if (current && menu.contains(current)) return;
+      const slot = document.createElement("li");
+      slot.className = "ctx-export-slot";
+      menu.append(slot);
+      setCanvasMenuSlot((current = slot));
+    };
     const obs = new MutationObserver(attach);
     obs.observe(document.body, { childList: true, subtree: true });
     return () => obs.disconnect();
@@ -635,6 +672,8 @@ export default function App() {
 
   // ponytail: rebuilds every root on any change; per-root refresh if big trees get slow
   const refreshWorkspace = useCallback(async () => {
+    for (const url of previewCache.current.values()) if (url) URL.revokeObjectURL(url);
+    previewCache.current.clear();
     const dirs = workspaceDirsRef.current;
     setWorkspaceTree(
       await Promise.all(
@@ -822,6 +861,56 @@ export default function App() {
       api.setToast({ message: `Save failed: ${err}`, closable: true });
     }
   }, []);
+
+  // Sidebar "Save as SVG/PNG": exports a diagram (the live canvas if it's the
+  // open file, so unsaved edits are included). The scene is embedded, so the
+  // image reopens in Excalidraw as an editable diagram.
+  const exportImage = async (path: string | null, fmt: "svg" | "png") => {
+    const api = apiRef.current;
+    if (!api) return;
+    const name = path ? baseName(path).replace(/\.excalidraw$/, "") : api.getAppState().name || "Untitled";
+    const target = await save({
+      filters: [{ name: fmt.toUpperCase(), extensions: [fmt] }],
+      defaultPath: path ? `${parentDir(path)}/${name}.${fmt}` : `${name}.${fmt}`,
+    });
+    if (!target) return;
+    try {
+      let scene;
+      if (!path || (currentFileRef.current && normPath(currentFileRef.current) === normPath(path))) {
+        scene = { elements: api.getSceneElements(), appState: api.getAppState(), files: api.getFiles() };
+      } else {
+        const loaded = await loadFromBlob(
+          new Blob([await readTextFile(path!)], { type: "application/json" }),
+          null,
+          null
+        );
+        scene = { ...loaded, elements: loaded.elements.filter((e) => !e.isDeleted) };
+      }
+      if (!scene.elements.length) {
+        api.setToast({ message: `${name} is empty`, closable: true });
+        return;
+      }
+      const opts = {
+        elements: scene.elements,
+        files: scene.files ?? null,
+        appState: { ...scene.appState, exportEmbedScene: true, exportBackground: true, exportWithDarkMode: false },
+      };
+      if (fmt === "svg") {
+        await writeTextFile(target, (await exportToSvg(opts)).outerHTML);
+      } else {
+        const blob = await exportToBlob({
+          ...opts,
+          getDimensions: (width: number, height: number) => ({ width: width * 2, height: height * 2, scale: 2 }),
+          mimeType: "image/png",
+        });
+        await writeFile(target, new Uint8Array(await blob.arrayBuffer()));
+      }
+      api.setToast({ message: `Saved ${baseName(target)}`, closable: true, duration: 2500 });
+    } catch (err) {
+      console.error("Image export failed:", err);
+      api.setToast({ message: `Export failed: ${err}`, closable: true });
+    }
+  };
 
   const handleSave = useCallback(() => doSave(false), [doSave]);
   const handleSaveAs = useCallback(() => doSave(true), [doSave]);
@@ -1432,15 +1521,106 @@ export default function App() {
   }, [loadFile]);
 
   const handleLinkOpen = useCallback(
-    (_element: unknown, event: CustomEvent) => {
-      const url = event.detail?.url;
-      if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
+    (element: { link?: string | null }, event: CustomEvent) => {
+      const url = element?.link ?? event.detail?.url ?? "";
+      if (url.startsWith("http://") || url.startsWith("https://")) {
         event.preventDefault();
         openUrl(url);
+        return;
+      }
+      // Link to another diagram: relative to the file holding the link
+      if (isDiagramLink(url)) {
+        event.preventDefault();
+        const cur = currentFileRef.current;
+        if (!cur && !isAbsolutePath(url)) {
+          apiRef.current?.setToast({ message: "Save this diagram first to follow relative links", closable: true });
+          return;
+        }
+        const target = resolvePath(cur ? parentDir(cur) : "", url);
+        exists(target).then((ok) =>
+          ok
+            ? openPathGuarded(target)
+            : apiRef.current?.setToast({ message: `Linked diagram not found: ${url}`, closable: true })
+        );
       }
     },
-    []
+    [openPathGuarded]
   );
+
+  // Link text for another diagram, relative to the open file so links survive
+  // moving or syncing the whole folder
+  const linkTo = (path: string) => {
+    const cur = currentFileRef.current;
+    return cur ? relativePath(parentDir(cur), path) : normPath(path);
+  };
+
+  // Dropping a sidebar file on the canvas creates a card linked to it
+  const insertDiagramLink = (path: string, clientX: number, clientY: number) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const { x, y } = viewportCoordsToSceneCoords({ clientX, clientY }, api.getAppState());
+    const created = convertToExcalidrawElements([
+      {
+        type: "rectangle",
+        x: x - 100,
+        y: y - 35,
+        width: 200,
+        height: 70,
+        roundness: { type: ROUNDNESS.ADAPTIVE_RADIUS },
+        link: linkTo(path),
+        label: { text: baseName(path).replace(/\.excalidraw$/, "") },
+      },
+    ]);
+    api.updateScene({
+      elements: [...api.getSceneElementsIncludingDeleted(), ...created],
+      appState: { selectedElementIds: { [created[0].id]: true } },
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  };
+
+  // ---- Sidebar hover preview
+  const renderPreview = async (path: string) => {
+    try {
+      const scene = await loadFromBlob(
+        new Blob([await readTextFile(path)], { type: "application/json" }),
+        null,
+        null
+      );
+      const elements = scene.elements.filter((e) => !e.isDeleted);
+      if (!elements.length) return "";
+      const svg = await exportToSvg({
+        elements,
+        files: scene.files ?? null,
+        appState: { ...scene.appState, exportBackground: true, exportWithDarkMode: false },
+      });
+      return URL.createObjectURL(new Blob([svg.outerHTML], { type: "image/svg+xml" }));
+    } catch {
+      return "";
+    }
+  };
+
+  const showPreview = (path: string, row: HTMLElement) => {
+    const h = hoverRef.current;
+    clearTimeout(h.timer);
+    h.path = path;
+    h.timer = window.setTimeout(async () => {
+      const r = row.getBoundingClientRect();
+      const pos = { path, left: r.right + 10, top: Math.max(8, Math.min(r.top - 60, window.innerHeight - 240)) };
+      let url = previewCache.current.get(path);
+      if (url === undefined) {
+        setPreview({ ...pos, url: null });
+        url = await renderPreview(path);
+        previewCache.current.set(path, url);
+      }
+      if (hoverRef.current.path === path) setPreview({ ...pos, url });
+    }, 450);
+  };
+
+  const hidePreview = () => {
+    clearTimeout(hoverRef.current.timer);
+    hoverRef.current.path = null;
+    setPreview(null);
+  };
 
   const toggleDir = (path: string) => {
     setExpandedDirs((prev) => {
@@ -1564,6 +1744,9 @@ export default function App() {
             dragNodeRef.current = null;
             if (n) moveNode(n, parentDir(node.path));
           }}
+          onMouseEnter={(e) => showPreview(node.path, e.currentTarget)}
+          onMouseLeave={hidePreview}
+          onMouseDown={hidePreview}
           onClick={() => {
             setSelectedDir(parentDir(node.path));
             openPathGuarded(node.path);
@@ -1579,7 +1762,6 @@ export default function App() {
             e.stopPropagation();
             setCtxMenu({ x: e.clientX, y: e.clientY, node });
           }}
-          title={node.name}
         >
           <span className="workspace-caret" />
           <FileIcon />
@@ -1693,7 +1875,7 @@ export default function App() {
             className="ctx-menu"
             style={{
               left: Math.min(ctxMenu.x, window.innerWidth - 190),
-              top: Math.min(ctxMenu.y, window.innerHeight - 140),
+              top: Math.min(ctxMenu.y, window.innerHeight - 230),
             }}
           >
             {workspaceDirs.includes(ctxMenu.node.path) ? (
@@ -1739,6 +1921,24 @@ export default function App() {
                 >
                   Rename
                 </button>
+                <button
+                  className="ctx-menu-item"
+                  onClick={() => {
+                    navigator.clipboard.writeText(linkTo(ctxMenu.node.path));
+                    apiRef.current?.setToast({
+                      message: "Link copied: select a shape, press Ctrl+K and paste",
+                      closable: true,
+                    });
+                  }}
+                >
+                  Copy link
+                </button>
+                <button className="ctx-menu-item" onClick={() => exportImage(ctxMenu.node.path, "svg")}>
+                  Save as SVG...
+                </button>
+                <button className="ctx-menu-item" onClick={() => exportImage(ctxMenu.node.path, "png")}>
+                  Save as PNG...
+                </button>
                 <button className="ctx-menu-item ctx-menu-item-danger" onClick={() => deleteNode(ctxMenu.node)}>
                   Delete
                 </button>
@@ -1752,7 +1952,35 @@ export default function App() {
             </button>
           </div>
         )}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        {preview && (
+          <div className="ws-preview" style={{ left: preview.left, top: preview.top }}>
+            <div className="ws-preview-name">{baseName(preview.path).replace(/\.excalidraw$/, "")}</div>
+            {preview.url ? (
+              <img src={preview.url} alt="" />
+            ) : (
+              <div className="ws-preview-empty">{preview.url === null ? "Loading…" : "Empty diagram"}</div>
+            )}
+          </div>
+        )}
+        <div
+          style={{ flex: 1, minWidth: 0 }}
+          onDragOverCapture={(e) => {
+            const n = dragNodeRef.current;
+            if (!n || n.dir) return;
+            e.preventDefault();
+            e.stopPropagation();
+            setDropDir(null);
+          }}
+          onDropCapture={(e) => {
+            const n = dragNodeRef.current;
+            if (!n || n.dir) return; // OS files etc. go to Excalidraw as usual
+            e.preventDefault();
+            e.stopPropagation();
+            dragNodeRef.current = null;
+            setDropDir(null);
+            insertDiagramLink(n.path, e.clientX, e.clientY);
+          }}
+        >
           <Excalidraw
             excalidrawAPI={(api) => {
               if (api && apiRef.current !== api) {
@@ -2047,6 +2275,26 @@ export default function App() {
           </button>
         </div>
       )}
+      {canvasMenuSlot &&
+        createPortal(
+          <>
+            <hr className="context-menu-item-separator" />
+            {(["svg", "png"] as const).map((fmt) => (
+              <button
+                key={fmt}
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  apiRef.current?.updateScene({ appState: { contextMenu: null } });
+                  exportImage(currentFileRef.current, fmt);
+                }}
+              >
+                <div className="context-menu-item__label">Save as {fmt.toUpperCase()}...</div>
+              </button>
+            ))}
+          </>,
+          canvasMenuSlot
+        )}
       {aiSlot &&
         createPortal(
           <button
